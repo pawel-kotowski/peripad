@@ -9,9 +9,8 @@ maintaining native performance for movements.
 import os
 import sys
 import evdev
-import time
 import signal
-from evdev import InputDevice, categorize, ecodes, UInput
+from evdev import InputDevice, ecodes, UInput
 
 # Button mapping
 BUTTON_MAP = {272: ecodes.BTN_LEFT, 273: ecodes.BTN_RIGHT, 274: ecodes.BTN_MIDDLE}
