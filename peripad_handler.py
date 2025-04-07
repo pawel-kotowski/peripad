@@ -2,18 +2,25 @@
 """
 Peripad 504 Event Handler
 This script reads raw events from the Peripad 504 touchpad
-and simulates mouse clicks using xdotool.
+and creates a virtual input device to handle buttons properly while
+maintaining native performance for movements.
 """
 
 import os
 import sys
-import subprocess
 import evdev
-from evdev import InputDevice, ecodes
+import time
+import signal
+from evdev import InputDevice, categorize, ecodes, UInput
 
-# Device path - update this if needed
-DEVICE_PATH = "/dev/input/event18"
-XDOTOOL_PATH = "/usr/bin/xdotool"
+# Button mapping
+BUTTON_MAP = {272: ecodes.BTN_LEFT, 273: ecodes.BTN_RIGHT, 274: ecodes.BTN_MIDDLE}
+
+# Scroll event codes
+SCROLL_VERTICAL = ecodes.REL_WHEEL
+SCROLL_HORIZONTAL = ecodes.REL_HWHEEL
+HIGH_RES_SCROLL_VERTICAL = 11  # REL_WHEEL_HI_RES
+HIGH_RES_SCROLL_HORIZONTAL = 12  # REL_HWHEEL_HI_RES
 
 
 def find_peripad_device():
@@ -28,50 +35,11 @@ def find_peripad_device():
     return None
 
 
-def run_xdotool(command):
-    """Run an xdotool command"""
-    try:
-        # Run xdotool as the real user
-        real_user = os.environ.get("SUDO_USER", os.environ.get("USER"))
-        cmd = f"sudo -u {real_user} {XDOTOOL_PATH} {command}"
-        subprocess.run(cmd, shell=True, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"xdotool error: {e}")
-    except Exception as e:
-        print(f"Error running xdotool: {e}")
-
-
-def handle_event(event):
-    """Handle input events"""
-    # Only process button events
-    if event.type == ecodes.EV_KEY:
-        if event.code == 272:  # Left button
-            if event.value == 1:  # Press
-                run_xdotool("mousedown 1")
-            else:  # Release
-                run_xdotool("mouseup 1")
-        elif event.code == 273:  # Right button
-            if event.value == 1:  # Press
-                run_xdotool("mousedown 3")
-            else:  # Release
-                run_xdotool("mouseup 3")
-        elif event.code == 274:  # Middle button
-            if event.value == 1:  # Press
-                run_xdotool("mousedown 2")
-            else:  # Release
-                run_xdotool("mouseup 2")
-
-
 def main():
     """Main function"""
     # Check if running as root
     if os.geteuid() != 0:
         print("This script must be run as root")
-        sys.exit(1)
-
-    # Check if xdotool exists
-    if not os.path.exists(XDOTOOL_PATH):
-        print(f"Error: xdotool not found at {XDOTOOL_PATH}")
         sys.exit(1)
 
     # Find the device
@@ -81,23 +49,84 @@ def main():
         sys.exit(1)
 
     print(f"Found Peripad device: {device.name}")
-    print("Monitoring events... (Press Ctrl+C to exit)")
+
+    # Get device capabilities
+    caps = device.capabilities()
+
+    # Setup signal handler for clean exit
+    def signal_handler(sig, frame):
+        print("\nExiting...")
+        try:
+            if "ui" in locals():
+                ui.close()
+            device.ungrab()
+        except:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
 
     try:
-        # Note: We are NOT grabbing the device, so events will be processed by both
-        # this script and the normal system handlers
+        # Create a new input device
+        ui = UInput.from_device(device, name="Peripad-Virtual")
+        print(f"Created virtual device: {ui.name}")
 
-        # Read events
+        # We need to grab the device to get exclusive access
+        device.grab()
+
+        # Main event loop
         for event in device.read_loop():
-            # Only handle button events, system will handle everything else
-            if event.type == ecodes.EV_KEY and event.code in (272, 273, 274):
-                handle_event(event)
+            if event.type == ecodes.EV_KEY:
+                if event.code in BUTTON_MAP:
+                    # Remap button events
+                    ui.write(ecodes.EV_KEY, BUTTON_MAP[event.code], event.value)
+                    ui.syn()
+                    print(
+                        f"Button event: {event.code} -> {BUTTON_MAP[event.code]} (value: {event.value})"
+                    )
+                else:
+                    # Pass through other key events
+                    ui.write(event.type, event.code, event.value)
+                    ui.syn()
+            elif event.type == ecodes.EV_REL:
+                if event.code in (SCROLL_VERTICAL, HIGH_RES_SCROLL_VERTICAL):
+                    # Invert vertical scroll for natural scrolling
+                    ui.write(event.type, event.code, -event.value)
+                    if event.code == SCROLL_VERTICAL:
+                        print(
+                            f"Natural scroll: vertical {event.value} -> {-event.value}"
+                        )
+                elif event.code in (SCROLL_HORIZONTAL, HIGH_RES_SCROLL_HORIZONTAL):
+                    # Invert horizontal scroll for natural scrolling
+                    ui.write(event.type, event.code, -event.value)
+                    if event.code == SCROLL_HORIZONTAL:
+                        print(
+                            f"Natural scroll: horizontal {event.value} -> {-event.value}"
+                        )
+                else:
+                    # Pass through other relative events (like movement)
+                    ui.write(event.type, event.code, event.value)
+                ui.syn()
+            elif event.type == ecodes.EV_SYN:
+                # Synchronization events
+                ui.syn()
+            else:
+                # Pass through all other events
+                ui.write(event.type, event.code, event.value)
+                ui.syn()
 
     except KeyboardInterrupt:
         print("\nExiting...")
+    except Exception as e:
+        print(f"Error: {e}")
     finally:
-        # Close device
-        device.close()
+        # Clean up
+        if "ui" in locals():
+            ui.close()
+        try:
+            device.ungrab()
+        except:
+            pass
 
 
 if __name__ == "__main__":
